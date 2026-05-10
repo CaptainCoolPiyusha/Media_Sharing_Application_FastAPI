@@ -1,37 +1,139 @@
-from fastapi import FastAPI, HTTPException
-from app.schemas import postCreate
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends 
+from fastapi.middleware.cors import CORSMiddleware
+from app.schemas import PostCreate, PostResponse, UserCreate, UserRead, UserUpdate
+from app.db import Post, User, create_db_and_tables, get_async_session 
+from sqlalchemy.ext.asyncio import AsyncSession 
+from contextlib import asynccontextmanager 
+from sqlalchemy import select 
+from app.images import imagekit 
+import os 
+import uuid 
+import shutil 
+import tempfile
+from app.users import auth_backend, current_active_user, fastapi_users
 
-myapp = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await create_db_and_tables()
+    yield 
 
-text_posts = {
-    1: {"title": "I'm the best", "content": "Just finished my first FastAPI project!"},
-    2: {"title": "Learning FastAPI is fun", "content": "FastAPI makes building APIs incredibly simple and efficient."},
-    3: {"title": "Python is awesome", "content": "Python's simplicity and power make it the perfect language for beginners and experts alike."},
-    4: {"title": "Building scalable APIs", "content": "Tips for designing APIs that can handle millions of requests."},
-    5: {"title": "Web development best practices", "content": "Always follow SOLID principles and maintain clean code structure."},
-    6: {"title": "Code review tips for developers", "content": "Constructive feedback and thorough testing leads to better software."},
-    7: {"title": "JavaScript vs Python comparison", "content": "Python excels in backend, JavaScript in frontend. Both have their strengths."},
-    8: {"title": "Database design matters", "content": "Proper indexing and schema design can improve performance by 10x."},
-    9: {"title": "Testing is crucial for quality", "content": "Unit tests, integration tests, and end-to-end tests catch bugs early."},
-    10: {"title": "DevOps for beginners", "content": "Understanding deployment pipelines and CI/CD is essential for modern development."}
-}
+myapp = FastAPI(lifespan=lifespan)
 
-@myapp.get("/posts")
-# Query-parameter
-def posts(limit:int = None):
-    if limit:
-        return list(text_posts.values())[:limit]    
-    return text_posts
+# Add CORS middleware
+myapp.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Path-parameter
-@myapp.get("/posts/{id}")
-def post_by_id(id: int):
-    if id not in text_posts:
-        raise HTTPException(status_code = 404, error = "Post not found")
-    return text_posts.get(id)
+myapp.include_router(fastapi_users.get_auth_router(auth_backend), prefix='/auth/jwt', tags=['auth'])
+myapp.include_router(fastapi_users.get_register_router(UserRead, UserCreate), prefix="/auth", tags=["auth"])
+myapp.include_router(fastapi_users.get_reset_password_router(), prefix="/auth", tags=["auth"])
+myapp.include_router(fastapi_users.get_verify_router(UserRead), prefix="/users", tags=["auth"])
+myapp.include_router(fastapi_users.get_users_router(UserRead, UserUpdate), prefix="/users", tags=["users"])
 
-@myapp.post("/posts")
-def create_post(post: postCreate):
-    new_post = {"title":post.title, "content":post.content}
-    text_posts[max(text_posts.keys()) + 1] = new_post
-    return new_post
+
+# upload the files
+@myapp.post("/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    caption: str = Form(""),
+    user: User = Depends(current_active_user),
+    session: AsyncSession = Depends(get_async_session)
+):
+    
+    temp_file_path = None
+    try:
+        # Create temp file and write uploaded content
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as temp_file:
+            temp_file_path = temp_file.name
+            shutil.copyfileobj(file.file, temp_file)
+    
+        # Upload to ImageKit
+        with open(temp_file_path, "rb") as f:
+            upload_result = imagekit.files.upload(
+                file=f,
+                file_name=file.filename,
+                tags=["backend-upload"]
+            )
+
+        # Check if upload was successful
+        if upload_result.url:
+            post = Post(
+                user_id = user.id,
+                caption=caption,
+                url=upload_result.url,
+                file_type="video" if file.content_type.startswith("video/") else "image",
+                file_name=upload_result.name
+            )
+            session.add(post)
+            await session.commit()
+            await session.refresh(post)
+            return post
+        else:
+            raise HTTPException(status_code=500, detail="Upload to ImageKit failed")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
+        file.file.close()
+
+@myapp.get("/feed")
+async def get_feed(
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user),
+):
+    result = await session.execute(select(Post).order_by(Post.created_at.desc()))
+    posts = [row[0] for row in result.all()]
+
+    result = await session.execute(select(User))
+    users = [row[0] for row in result.all()]
+    user_dict = {u.id: u.email for u in users}
+
+    posts_data = []
+    for post in posts:
+        posts_data.append(
+            {
+                "id": str(post.id),
+                "user_id": str(post.user_id),
+                "caption": post.caption,
+                "url": post.url,
+                "file_type": post.file_type,
+                "file_name": post.file_name,
+                "created_at": post.created_at.isoformat(),
+                "is_owner": post.user_id == user.id,
+                "email": user_dict.get(post.user_id, "Unknown")
+
+            }
+        )
+    return {"posts": posts_data}
+
+@myapp.delete("/posts/{post_id}")
+async def delete_post(
+    post_id: str,
+    session: AsyncSession = Depends(get_async_session),
+    user: User = Depends(current_active_user)
+):
+    try:
+        post_uuid = uuid.UUID(post_id)
+
+        result = await session.execute(select(Post).where(Post.id == post_uuid))
+        post = result.scalars().first()
+
+        if not post:
+            raise HTTPException(status_code=404, detail="Post not found")
+        
+        if post.user_id != user.id:
+            raise HTTPException(status_code=403, detail="You don't have permission to delete the post.")
+        await session.delete(post)
+        await session.commit()
+
+        return {"success": True, "message": "Post deleted successfully"}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    

@@ -1,6 +1,14 @@
 .env
 myenv/
-__pycache__/
-*.pyc
 .DS_Store
 .vscode
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# VS Code temporary runner file
+tempCodeRunnerFile.py
+
+# SQLite database
+test.db
