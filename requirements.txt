@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+aiosqlite
+fastapi-users[sqlalchemy]
+python-multipart
+imagekitio
+python-dotenv
+pyjwt
