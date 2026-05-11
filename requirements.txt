@@ -7,3 +7,5 @@ python-multipart
 imagekitio
 python-dotenv
 pyjwt
+streamlit
+requests
