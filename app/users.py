@@ -11,8 +11,9 @@ from fastapi_users.authentication import(
 from fastapi_users.db import SQLAlchemyUserDatabase
 
 from app.db import User, get_user_db
+import os
 
-SECRET = "your-super-secret-key-must-be-at-least-32-characters-long-12345"
+SECRET = os.getenv("SECRET_KEY", "this-is-my-fallback-secret-key-for-local-dev")
 
 class UserManager(UUIDIDMixin, BaseUserManager[User, uuid.UUID]):
     reset_password_token_secret = SECRET
