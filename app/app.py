@@ -12,6 +12,8 @@ import shutil
 import tempfile
 from app.users import auth_backend, current_active_user, fastapi_users
 
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:8501").split(",")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await create_db_and_tables()
@@ -22,7 +24,7 @@ myapp = FastAPI(lifespan=lifespan)
 # Add CORS middleware
 myapp.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
